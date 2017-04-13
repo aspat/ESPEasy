@@ -109,6 +109,28 @@
 // Use the "System Info" device to read the VCC value
 #define FEATURE_ADC_VCC                  false
 
+
+//enable Arduino OTA updating.
+//Note: This adds around 10kb to the firmware size, and 1kb extra ram.
+//Normally only enabled for the platformio dev environment, since its helpfull while developing.
+// #define FEATURE_ARDUINO_OTA
+
+
+//Select which plugin sets you want to build.
+//These are normally automaticly set via the Platformio build environment.
+//If you use ArduinoIDE you might need to uncomment some of them, depending on your needs
+//If you dont select any, a version with a minimal number of plugins will be biult for 512k versions.
+//(512k is NOT finsihed or tested yet as of v2.0.0-dev6)
+
+//build all the normal stable plugins
+//#define PLUGIN_BUILD_NORMAL
+
+//build all plugins that are in test stadium
+//#define PLUGIN_BUILD_TESTING
+
+//build all plugins that still are being developed and are broken or incomplete
+//#define PLUGIN_BUILD_DEV
+
 // ********************************************************************************
 //   DO NOT CHANGE ANYTHING BELOW THIS LINE
 // ********************************************************************************
@@ -231,6 +253,7 @@
 
 #define BOOT_CAUSE_MANUAL_REBOOT            0
 #define BOOT_CAUSE_COLD_BOOT                1
+#define BOOT_CAUSE_DEEP_SLEEP               2
 #define BOOT_CAUSE_EXT_WD                  10
 
 #define DAT_TASKS_SIZE                   2048
@@ -272,6 +295,13 @@ ADC_MODE(ADC_VCC);
 extern "C" {
 #include "user_interface.h"
 }
+
+
+#ifdef FEATURE_ARDUINO_OTA
+#include <ArduinoOTA.h>
+#include <ESP8266mDNS.h>
+bool ArduinoOTAtriggered=false;
+#endif
 
 // Setup DNS, only used if the ESP has no valid WiFi config
 const byte DNS_PORT = 53;
@@ -512,7 +542,7 @@ struct RTCStruct
   boolean valid;
   byte factoryResetCounter;
   byte deepSleepState;
-  byte rebootCounter;
+  byte rebootCounter; //not used yet?
   byte flashDayCounter;
   unsigned long flashCounter;
 } RTC;
@@ -529,7 +559,6 @@ float UserVar[VARS_PER_TASK * TASKS_MAX];
 unsigned long RulesTimer[RULES_TIMER_MAX];
 
 unsigned long timerSensor[TASKS_MAX];
-unsigned long timer;
 unsigned long timer100ms;
 unsigned long timer20ms;
 unsigned long timer1s;
@@ -560,7 +589,7 @@ byte NPlugin_id[NPLUGIN_MAX];
 
 String dummyString = "";
 
-byte lastBootCause = 0;
+byte lastBootCause = BOOT_CAUSE_MANUAL_REBOOT;
 
 boolean wifiSetup = false;
 boolean wifiSetupConnect = false;
@@ -650,17 +679,34 @@ void setup()
   if (Settings.UseSerial && Settings.SerialLogLevel >= LOG_LEVEL_DEBUG_MORE)
     Serial.setDebugOutput(true);
 
+  hardwareInit();
+
   WiFi.persistent(false); // Do not use SDK storage of SSID/WPA parameters
   WifiAPconfig();
   if (!WifiConnect(true,3))
     WifiConnect(false,3);
 
-  hardwareInit();
+
+  //After booting, we want all the tasks to run without delaying more than neccesary.
+  //Plugins that need an initial startup delay need to overwrite their initial timerSensor value in PLUGIN_INIT
+  //They should also check if we returned from deep sleep so that they can skip the delay in that case.
+  for (byte x = 0; x < TASKS_MAX; x++)
+    if (Settings.TaskDeviceTimer[x] !=0)
+      timerSensor[x] = millis() + (x * Settings.MessageDelay);
+
+  timer100ms = 0; // timer for periodic actions 10 x per/sec
+  timer1s = 0; // timer for periodic actions once per/sec
+  timerwd = 0; // timer for watchdog once per 30 sec
+
   PluginInit();
   CPluginInit();
   NPluginInit();
 
   WebServerInit();
+
+  #ifdef FEATURE_ARDUINO_OTA
+  ArduinoOTAInit();
+  #endif
 
   // setup UDP
   if (Settings.UDPPort != 0)
@@ -673,25 +719,19 @@ void setup()
 
   sendSysInfoUDP(3);
 
-  log = F("INIT : Boot OK");
-  addLog(LOG_LEVEL_INFO, log);
-
-  if (Settings.deepSleep)
-  {
-    log = F("INIT : Deep sleep enabled");
-    addLog(LOG_LEVEL_INFO, log);
-  }
-
-  byte bootMode = 0;
+  //warm boot
   if (readFromRTC())
   {
     readUserVarFromRTC();
-    bootMode = RTC.deepSleepState;
-    if (bootMode == 1)
-      log = F("INIT : Reboot from deepsleep");
+    if (RTC.deepSleepState == 1)
+    {
+      log = F("INIT : Rebooted from deepsleep");
+      lastBootCause=BOOT_CAUSE_DEEP_SLEEP;
+    }
     else
       log = F("INIT : Normal boot");
   }
+  //cold boot (RTC memory empty)
   else
   {
     RTC.factoryResetCounter=0;
@@ -702,32 +742,13 @@ void setup()
     saveToRTC();
 
     // cold boot situation
-    if (lastBootCause == 0) // only set this if not set earlier during boot stage.
+    if (lastBootCause == BOOT_CAUSE_MANUAL_REBOOT) // only set this if not set earlier during boot stage.
       lastBootCause = BOOT_CAUSE_COLD_BOOT;
     log = F("INIT : Cold Boot");
   }
 
   addLog(LOG_LEVEL_INFO, log);
 
-  // Setup timers
-  if (bootMode == 0)
-  {
-    for (byte x = 0; x < TASKS_MAX; x++)
-      if (Settings.TaskDeviceTimer[x] !=0)
-        timerSensor[x] = millis() + 30000 + (x * Settings.MessageDelay);
-
-    timer = millis() + 30000; // startup delay 30 sec
-  }
-  else
-  {
-    for (byte x = 0; x < TASKS_MAX; x++)
-      timerSensor[x] = millis() + 0;
-    timer = millis() + 0; // no startup from deepsleep wake up
-  }
-
-  timer100ms = millis() + 100; // timer for periodic actions 10 x per/sec
-  timer1s = millis() + 1000; // timer for periodic actions once per/sec
-  timerwd = millis() + 30000; // timer for watchdog once per 30 sec
 
   if (Settings.UseNTP)
     initTime();
@@ -747,8 +768,10 @@ void setup()
     String event = F("System#Boot");
     rulesProcessing(event);
   }
+
   RTC.deepSleepState=0;
   saveToRTC();
+
 }
 
 
@@ -771,20 +794,34 @@ void loop()
       if (!PluginCall(PLUGIN_SERIAL_IN, 0, dummyString))
         serial();
 
+  // Deep sleep mode, just run all tasks one time and go back to sleep as fast as possible
+  if (Settings.deepSleep)
+  {
+      run50TimesPerSecond();
+      run10TimesPerSecond();
+      runEach30Seconds();
+      runOncePerSecond();
+      deepSleep(Settings.Delay);
+      //deepsleep will never return, its a special kind of reboot
+  }
+  //normal mode, run each task when its time
+  else
+  {
 
-  if (millis() > timer20ms)
-    run50TimesPerSecond();
+    if (millis() > timer20ms)
+      run50TimesPerSecond();
 
-  if (millis() > timer100ms)
-    run10TimesPerSecond();
+    if (millis() > timer100ms)
+      run10TimesPerSecond();
 
-  if (millis() > timer1s)
-    runOncePerSecond();
+    if (millis() > timerwd)
+      runEach30Seconds();
 
-  if (millis() > timerwd)
-    runEach30Seconds();
+    if (millis() > timer1s)
+      runOncePerSecond();
 
-  backgroundtasks();
+    backgroundtasks();
+  }
 
 }
 
@@ -933,28 +970,18 @@ void runEach30Seconds()
 \*********************************************************************************************/
 void checkSensors()
 {
-  // Check sensors and send data to controller when sensor timer has elapsed
-  // If deepsleep, use the single timer
-  if (Settings.deepSleep)
+  //check all the devices and only run the sendtask if its time, or we if we used deep sleep mode
+  for (byte x = 0; x < TASKS_MAX; x++)
   {
-    if (millis() > timer)
+    if (
+        (Settings.TaskDeviceTimer[x] != 0) &&
+        (Settings.deepSleep || (millis() > timerSensor[x]))
+    )
     {
-      timer = millis() + Settings.Delay * 1000;  // todo, does this make sense, we will cold boot later...
-      SensorSend();
-      deepSleep(Settings.Delay);
-    }
-  }
-  else // use individual timers for tasks
-  {
-    for (byte x = 0; x < TASKS_MAX; x++)
-    {
-      if ((Settings.TaskDeviceTimer[x] != 0) && (millis() > timerSensor[x]))
-      {
-        timerSensor[x] = millis() + Settings.TaskDeviceTimer[x] * 1000;
-        if (timerSensor[x] == 0) // small fix if result is 0, else timer will be stopped...
-          timerSensor[x] = 1;
-        SensorSendTask(x);
-      }
+      timerSensor[x] = millis() + Settings.TaskDeviceTimer[x] * 1000;
+      if (timerSensor[x] == 0) // small fix if result is 0, else timer will be stopped...
+        timerSensor[x] = 1;
+      SensorSendTask(x);
     }
   }
   saveUserVarToRTC();
@@ -964,13 +991,13 @@ void checkSensors()
 /*********************************************************************************************\
  * send all sensordata
 \*********************************************************************************************/
-void SensorSend()
-{
-  for (byte x = 0; x < TASKS_MAX; x++)
-  {
-    SensorSendTask(x);
-  }
-}
+// void SensorSendAll()
+// {
+//   for (byte x = 0; x < TASKS_MAX; x++)
+//   {
+//     SensorSendTask(x);
+//   }
+// }
 
 
 /*********************************************************************************************\
@@ -1124,5 +1151,18 @@ void backgroundtasks()
   MQTTclient.loop();
   statusLED(false);
   checkUDP();
+
+  #ifdef FEATURE_ARDUINO_OTA
+  ArduinoOTA.handle();
+
+  //once OTA is triggered, only handle that and dont do other stuff. (otherwise it fails)
+  while (ArduinoOTAtriggered)
+  {
+    yield();
+    ArduinoOTA.handle();
+  }
+
+  #endif
+
   yield();
 }

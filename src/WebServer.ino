@@ -163,13 +163,23 @@ void handle_root() {
     reply += F("<TD><TD>GIT version:<TD>");
     reply += BUILD_GIT;
 
-    reply += F("<TR><TD>System Time:<TD>");
+    reply += F("<TR><TD>Local Time:<TD>");
     if (Settings.UseNTP)
     {
-      reply += hour();
-      reply += ":";
-      if (minute() < 10)
+      reply += year();
+      reply += F("-");
+      if (month() < 10)
         reply += "0";
+      reply += month();
+      reply += F("-");
+      if (day() < 10)
+      	reply += F("0");
+      reply += day();
+      reply += F(" ");
+      reply += hour();
+      reply += F(":");
+      if (minute() < 10)
+        reply += F("0");
       reply += minute();
     }
     else
@@ -338,10 +348,10 @@ void handle_config() {
   }
 
   reply += F("<form name='frmselect' method='post'><table>");
-  reply += F("<TH>Main Settings<TH><TR><TD>Name:<TD><input type='text' name='name' value='");
+  reply += F("<TH>Main Settings<TH><TR><TD>Name:<TD><input type='text'  maxlength='25' name='name' value='");
   Settings.Name[25] = 0;
   reply += Settings.Name;
-  reply += F("'><TR><TD>Admin Password:<TD><input type='text' name='password' value='");
+  reply += F("'><TR><TD>Admin Password:<TD><input type='password' maxlength='25'  name='password' value='");
   SecuritySettings.Password[25] = 0;
   reply += SecuritySettings.Password;
   reply += F("'><TR><TD>SSID:<TD><input type='text' name='ssid' value='");
@@ -353,7 +363,7 @@ void handle_config() {
   reply += F("'><TR><TD>Fallback WPA Key:<TD><input type='password' maxlength='63' name='key2' value='");
   reply += SecuritySettings.WifiKey2;
 
-  reply += F("'><TR><TD>WPA AP Mode Key:<TD><input type='text' maxlength='63' name='apkey' value='");
+  reply += F("'><TR><TD>WPA AP Mode Key:<TD><input type='password' maxlength='63' name='apkey' value='");
   reply += SecuritySettings.WifiAPKey;
 
   reply += F("'><TR><TD>Unit nr:<TD><input type='text' name='unit' value='");
@@ -363,9 +373,9 @@ void handle_config() {
 
   char str[20];
 
-  reply += F("<TR><TD>Sensor Delay:<TD><input type='text' name='delay' value='");
+  reply += F("<TR><TD>Sleep Delay:<TD><input type='text' name='delay' value='");
   reply += Settings.Delay;
-  reply += F("'><TR><TD>Sleep Mode:<TD>");
+  reply += F("'><TR><TD>Sleep enabled:<TD>");
   if (Settings.deepSleep)
     reply += F("<input type=checkbox name='deepsleep' checked>");
   else
@@ -598,7 +608,7 @@ void handle_controllers() {
 
       if (Protocol[ProtocolIndex].usesPassword)
       {
-        reply += F("<TR><TD>Controller Password:<TD><input type='text' name='controllerpassword' value='");
+        reply += F("<TR><TD>Controller Password:<TD><input type='password' name='controllerpassword' value='");
         reply += SecuritySettings.ControllerPassword[index - 1];
         reply += F("'>");
       }
@@ -1852,7 +1862,7 @@ void handle_i2cscanner() {
           reply += F("PCF8574<BR>MCP23017<BR>LCD<BR>PN532");
           break;
         case 0x29:
-          reply += F("TLS2561");
+          reply += F("TSL2561");
           break;
         case 0x38:
         case 0x3A:
@@ -1862,7 +1872,7 @@ void handle_i2cscanner() {
           reply += F("PCF8574A");
           break;
         case 0x39:
-          reply += F("PCF8574A<BR>TLS2561");
+          reply += F("PCF8574A<BR>TSL2561");
           break;
         case 0x3C:
         case 0x3D:
@@ -1882,7 +1892,7 @@ void handle_i2cscanner() {
           reply += F("PCF8591<BR>ADS1115");
           break;
         case 0x49:
-          reply += F("PCF8591<BR>ADS1115<BR>TLS2561");
+          reply += F("PCF8591<BR>ADS1115<BR>TSL2561");
           break;
         case 0x4C:
         case 0x4D:
@@ -2887,11 +2897,22 @@ void handle_sysinfo() {
 
   if (Settings.UseNTP)
   {
-    reply += F("<TR><TD>System Time:<TD>");
-    reply += hour();
-    reply += ":";
-    if (minute() < 10)
+
+    reply += F("<TR><TD>Local Time:<TD>");
+    reply += year();
+    reply += F("-");
+    if (month() < 10)
       reply += "0";
+    reply += month();
+    reply += F("-");
+    if (day() < 10)
+    	reply += F("0");
+    reply += day();
+    reply += F(" ");
+    reply += hour();
+    reply += F(":");
+    if (minute() < 10)
+      reply += F("0");
     reply += minute();
   }
 
@@ -2959,16 +2980,18 @@ void handle_sysinfo() {
   reply += BUILD_GIT;
 
   reply += F("<TR><TD>Plugin sets:<TD>");
-  #ifdef PLUGIN_BUILD_DEV
-    reply += F("Normal, Testing, Development");
-  #elif PLUGIN_BUILD_TESTING
-    reply += F("Normal, Testing");
-  #elif PLUGIN_BUILD_NORMAL
-    reply += F("Normal");
-  #else
-    reply += F("Minimal");
+
+  #ifdef PLUGIN_BUILD_NORMAL
+    reply += F("[Normal] ");
   #endif
 
+  #ifdef PLUGIN_BUILD_TESTING
+    reply += F("[Testing] ");
+  #endif
+
+  #ifdef PLUGIN_BUILD_DEV
+    reply += F("[Development] ");
+  #endif
 
   reply += F("<TR><TD>Core Version:<TD>");
   reply += ESP.getCoreVersion();
@@ -2996,6 +3019,9 @@ void handle_sysinfo() {
   {
     case BOOT_CAUSE_MANUAL_REBOOT:
       reply += F("Manual reboot");
+      break;
+    case BOOT_CAUSE_DEEP_SLEEP: //nobody should ever see this, since it should sleep again right away.
+      reply += F("Deep sleep");
       break;
     case BOOT_CAUSE_COLD_BOOT:
       reply += F("Cold boot");
