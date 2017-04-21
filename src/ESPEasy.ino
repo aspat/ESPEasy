@@ -272,8 +272,8 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <PubSubClient.h>
-#include <ArduinoJson.h>
-#include <LiquidCrystal_I2C.h>
+// #include <ArduinoJson.h>
+// #include <LiquidCrystal_I2C.h>
 #include <Servo.h>
 #define FS_NO_GLOBALS
 #include <FS.h>
@@ -308,8 +308,6 @@ const byte DNS_PORT = 53;
 IPAddress apIP(192, 168, 4, 1);
 DNSServer dnsServer;
 
-Servo myservo1;
-Servo myservo2;
 
 // MQTT client
 WiFiClient mqtt;
@@ -795,7 +793,7 @@ void loop()
         serial();
 
   // Deep sleep mode, just run all tasks one time and go back to sleep as fast as possible
-  if (Settings.deepSleep)
+  if (isDeepSleepEnabled())
   {
       run50TimesPerSecond();
       run10TimesPerSecond();
@@ -819,9 +817,8 @@ void loop()
 
     if (millis() > timer1s)
       runOncePerSecond();
-
-    backgroundtasks();
   }
+  backgroundtasks();
 
 }
 
@@ -834,6 +831,8 @@ void run50TimesPerSecond()
 {
   timer20ms = millis() + 20;
   PluginCall(PLUGIN_FIFTY_PER_SECOND, 0, dummyString);
+
+  statusLED(false);
 }
 
 /*********************************************************************************************\
@@ -970,12 +969,13 @@ void runEach30Seconds()
 \*********************************************************************************************/
 void checkSensors()
 {
+  bool isDeepSleep = isDeepSleepEnabled();
   //check all the devices and only run the sendtask if its time, or we if we used deep sleep mode
   for (byte x = 0; x < TASKS_MAX; x++)
   {
     if (
         (Settings.TaskDeviceTimer[x] != 0) &&
-        (Settings.deepSleep || (millis() > timerSensor[x]))
+        (isDeepSleep || (millis() > timerSensor[x]))
     )
     {
       timerSensor[x] = millis() + Settings.TaskDeviceTimer[x] * 1000;
@@ -1149,7 +1149,6 @@ void backgroundtasks()
 
   WebServer.handleClient();
   MQTTclient.loop();
-  statusLED(false);
   checkUDP();
 
   #ifdef FEATURE_ARDUINO_OTA

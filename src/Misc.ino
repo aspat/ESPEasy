@@ -1,7 +1,8 @@
 
-void deepSleep(int delay)
+bool isDeepSleepEnabled()
 {
-  String log;
+  if (!Settings.deepSleep)
+    return false;
 
   //cancel deep sleep loop by pulling the pin GPIO16(D0) to GND
   //recommended wiring: 3-pin-header with 1=RST, 2=D0, 3=GND
@@ -9,9 +10,18 @@ void deepSleep(int delay)
   //                    short 2-3 to cancel sleep loop for modifying settings
   pinMode(16,INPUT_PULLUP);
   if (!digitalRead(16))
+    return false;
+
+  return true;
+}
+
+void deepSleep(int delay)
+{
+  String log;
+
+  if (!isDeepSleepEnabled())
   {
-    log = F("Deep sleep canceled by GPIO16(D0)=LOW.");
-    addLog(LOG_LEVEL_INFO, log);
+    //Deep sleep canceled by GPIO16(D0)=LOW
     return;
   }
 
@@ -22,7 +32,7 @@ void deepSleep(int delay)
     addLog(LOG_LEVEL_INFO, log);
     delayMillis(30000);
     //disabled?
-    if (!Settings.deepSleep)
+    if (!isDeepSleepEnabled())
     {
       log = F("Deep sleep disabled.");
       addLog(LOG_LEVEL_INFO, log);
@@ -38,7 +48,9 @@ void deepSleep(int delay)
 
   String event = F("System#Sleep");
   rulesProcessing(event);
-  ESP.deepSleep(delay * 1000000, WAKE_RF_DEFAULT);
+  if (delay > 4294 || delay < 0)
+    delay = 4294;   //max sleep time ~1.2h
+  ESP.deepSleep((uint32_t)delay * 1000000, WAKE_RF_DEFAULT);
 }
 
 boolean remoteConfig(struct EventStruct *event, String& string)
@@ -332,35 +344,58 @@ boolean timeOut(unsigned long timer)
 
 /********************************************************************************************\
   Status LED
-  \*********************************************************************************************/
+\*********************************************************************************************/
+#define STATUS_PWM_LOWACTIVE
+#define STATUS_PWM_NORMALVALUE (PWMRANGE>>2)
+#define STATUS_PWM_NORMALFADE (PWMRANGE>>8)
+#define STATUS_PWM_TRAFFICRISE (PWMRANGE>>1)
+
 void statusLED(boolean traffic)
 {
+  static int gnStatusValueCurrent = -1;
+
   if (Settings.Pin_status_led == -1)
     return;
 
-  static unsigned long timer = 0;
-  static byte currentState = 0;
+  if (gnStatusValueCurrent<0)
+    pinMode(Settings.Pin_status_led, OUTPUT);
+
+  int nStatusValue = gnStatusValueCurrent;
 
   if (traffic)
   {
-    currentState = HIGH;
-    digitalWrite(Settings.Pin_status_led, currentState); // blink off
-    timer = millis() + 100;
+    nStatusValue += STATUS_PWM_TRAFFICRISE; //ramp up fast
+  }
+  else
+  {
+    if (AP_Mode) //apmode is active
+    {
+      nStatusValue = ((millis()>>1) & PWMRANGE) - (PWMRANGE>>2); //ramp up for 2 sec, 3/4 luminosity
+    }
+    else if (WiFi.status() != WL_CONNECTED)
+    {
+      nStatusValue = (millis()>>1) & (PWMRANGE>>2); //ramp up for 1/2 sec, 1/4 luminosity
+    }
+    else //connected
+    {
+      nStatusValue -= STATUS_PWM_NORMALFADE; //ramp down slowly
+      nStatusValue = std::max(nStatusValue, STATUS_PWM_NORMALVALUE);
+    }
   }
 
-  if (timer == 0 || millis() > timer)
-  {
-    timer = 0;
-    byte state = HIGH;
-    if (WiFi.status() == WL_CONNECTED)
-      state = LOW;
+  nStatusValue = constrain(nStatusValue, 0, PWMRANGE);
 
-    if (currentState != state)
-    {
-      currentState = state;
-      pinMode(Settings.Pin_status_led, OUTPUT);
-      digitalWrite(Settings.Pin_status_led, state);
-    }
+  if (gnStatusValueCurrent != nStatusValue)
+  {
+    gnStatusValueCurrent = nStatusValue;
+
+    long pwm = nStatusValue * nStatusValue; //simple gamma correction
+    pwm >>= 10;
+#ifdef STATUS_PWM_LOWACTIVE
+    pwm = PWMRANGE-pwm;
+#endif
+
+    analogWrite(Settings.Pin_status_led, pwm);
   }
 }
 
@@ -1015,6 +1050,12 @@ void addLog(byte loglevel, String& string)
   addLog(loglevel, string.c_str());
 }
 
+void addLog(byte logLevel, const __FlashStringHelper* flashString)
+{
+    String s(flashString);
+    addLog(logLevel, s.c_str());
+}
+
 void addLog(byte loglevel, const char *line)
 {
   if (Settings.UseSerial)
@@ -1032,7 +1073,9 @@ void addLog(byte loglevel, const char *line)
     Logging[logcount].timeStamp = millis();
     if (Logging[logcount].Message == 0)
       Logging[logcount].Message =  (char *)malloc(128);
-    strncpy(Logging[logcount].Message, line, 128);
+    strncpy(Logging[logcount].Message, line, 127);
+    Logging[logcount].Message[127]=0; //make sure its null terminated!
+
   }
 
   if (loglevel <= Settings.SDLogLevel)
@@ -2299,6 +2342,7 @@ void checkRAM(byte id)
   \*********************************************************************************************/
 void tone(uint8_t _pin, unsigned int frequency, unsigned long duration) {
   analogWriteFreq(frequency);
+  //NOTE: analogwrite reserves IRAM and uninitalized ram.
   analogWrite(_pin,100);
   delay(duration);
   analogWrite(_pin,0);
@@ -2473,6 +2517,7 @@ void ArduinoOTAInit()
 {
   // Default port is 8266
   ArduinoOTA.setPort(8266);
+	ArduinoOTA.setHostname(Settings.Name);
 
   if (SecuritySettings.Password[0]!=0)
     ArduinoOTA.setPassword(SecuritySettings.Password);
@@ -2513,5 +2558,29 @@ void ArduinoOTAInit()
 
 }
 
-
 #endif
+
+String getBearing(int degrees)
+{
+  const char* bearing[] = {
+    PSTR("N"),
+    PSTR("NNE"),
+    PSTR("NE"),
+    PSTR("ENE"),
+    PSTR("E"),
+    PSTR("ESE"),
+    PSTR("SE"),
+    PSTR("SSE"),
+    PSTR("S"),
+    PSTR("SSW"),
+    PSTR("SW"),
+    PSTR("WSW"),
+    PSTR("W"),
+    PSTR("WNW"),
+    PSTR("NW"),
+    PSTR("NNW")
+  };
+
+    return(bearing[int(degrees/22.5)]);
+
+}
